@@ -8,7 +8,6 @@ const jwt = require('jsonwebtoken');
 const Joi = require('joi');
 const rateLimit = require("express-rate-limit");
 
-const refreshTokens = new Set();
 
 const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
@@ -41,6 +40,7 @@ router.post('/register', async (req, res) => {
 });
 
 // Login
+// Login route
 router.post('/login', loginLimiter, async (req, res) => {
     try {
         const { email, password } = req.body;
@@ -53,7 +53,9 @@ router.post('/login', loginLimiter, async (req, res) => {
         const accessToken = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '15m' });
         const refreshToken = jwt.sign({ userId: user._id }, process.env.REFRESH_TOKEN_SECRET, { expiresIn: '7d' });
 
-        refreshTokens.add(refreshToken);
+        // Store the refresh token in the database
+        user.refreshToken = refreshToken;
+        await user.save();
 
         res.json({ message: 'Login successful', accessToken, refreshToken });
     } catch (error) {
@@ -62,28 +64,41 @@ router.post('/login', loginLimiter, async (req, res) => {
 });
 
 // Logout route
-router.post('/logout', auth, (req, res) => {
-    const refreshToken = req.body.refreshToken;
-    refreshTokens.delete(refreshToken);
-    res.json({ message: 'Logged out successfully' });
+router.post('/logout', auth, async (req, res) => {
+    try {
+        const { refreshToken } = req.body;
+        const user = await User.findOne({ refreshToken });
+        if (user) {
+            user.refreshToken = null;
+            await user.save();
+        }
+        res.json({ message: 'Logged out successfully' });
+    } catch (error) {
+        res.status(500).json({ message: 'Error logging out', error: error.message });
+    }
 });
 
 // Refresh token route
-router.post('/refresh-token', (req, res) => {
+router.post('/refresh-token', async (req, res) => {
     const { refreshToken } = req.body;
-    if (!refreshToken || !refreshTokens.has(refreshToken)) {
-        return res.status(403).json({ message: 'Invalid refresh token' });
+    if (!refreshToken) {
+        return res.status(400).json({ message: 'Refresh token required' });
     }
 
     try {
-        const user = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
-        const accessToken = jwt.sign({ userId: user.userId }, process.env.JWT_SECRET, { expiresIn: '15m' });
+        const user = await User.findOne({ refreshToken });
+        if (!user) {
+            return res.status(403).json({ message: 'Invalid refresh token' });
+        }
+
+        const decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
+        const accessToken = jwt.sign({ userId: decoded.userId }, process.env.JWT_SECRET, { expiresIn: '15m' });
+
         res.json({ accessToken });
     } catch (error) {
         res.status(403).json({ message: 'Invalid refresh token' });
     }
 });
-
 // Get user profile
 router.get('/profile', auth, async (req, res) => {
     try {
