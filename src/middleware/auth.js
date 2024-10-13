@@ -1,3 +1,5 @@
+// middleware/auth.js
+
 const jwt = require('jsonwebtoken');
 
 const auth = (req, res, next) => {
@@ -22,6 +24,9 @@ const auth = (req, res, next) => {
 
         next();
     } catch (error) {
+        if (error.name === 'TokenExpiredError') {
+            return res.status(401).json({ message: 'Token expired', expired: true });
+        }
         res.status(401).json({ message: 'Token is not valid', error: error.message });
     }
 };

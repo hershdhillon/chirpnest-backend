@@ -1,11 +1,35 @@
+// userRoutes.js
+
 const express = require('express');
 const router = express.Router();
 const User = require('../models/User');
 const auth = require('../middleware/auth');
 const jwt = require('jsonwebtoken');
+const Joi = require('joi');
+const rateLimit = require("express-rate-limit");
+
+const refreshTokens = new Set();
+
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 5 // limit each IP to 5 requests per windowMs
+});
+
+const registerValidation = (data) => {
+    const schema = Joi.object({
+        username: Joi.string().min(3).max(30).required(),
+        email: Joi.string().email().required(),
+        password: Joi.string().min(6).required()
+    });
+    return schema.validate(data);
+};
 
 // Register a new user
 router.post('/register', async (req, res) => {
+
+    const { error } = registerValidation(req.body);
+    if (error) return res.status(400).json({ message: error.details[0].message });
+
     try {
         const { username, email, password } = req.body;
         const user = new User({ username, email, passwordHash: password });
@@ -17,34 +41,49 @@ router.post('/register', async (req, res) => {
 });
 
 // Login
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
     try {
         const { email, password } = req.body;
-        console.log('Login attempt for email:', email);
-
         const user = await User.findOne({ email });
-        console.log('User found:', user);
 
-        if (!user) {
-            return res.status(401).json({ message: 'Invalid credentials (user not found)' });
+        if (!user || !(await user.comparePassword(password))) {
+            return res.status(401).json({ message: 'Invalid credentials' });
         }
 
-        const isMatch = await user.comparePassword(password);
-        console.log('Password match:', isMatch);
+        const accessToken = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '15m' });
+        const refreshToken = jwt.sign({ userId: user._id }, process.env.REFRESH_TOKEN_SECRET, { expiresIn: '7d' });
 
-        if (!isMatch) {
-            return res.status(401).json({ message: 'Invalid credentials (password mismatch)' });
-        }
+        refreshTokens.add(refreshToken);
 
-        // Generate JWT
-        const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-
-        res.json({ message: 'Login successful', token });
+        res.json({ message: 'Login successful', accessToken, refreshToken });
     } catch (error) {
-        console.error('Login error:', error);
         res.status(400).json({ message: 'Error logging in', error: error.message });
     }
 });
+
+// Logout route
+router.post('/logout', auth, (req, res) => {
+    const refreshToken = req.body.refreshToken;
+    refreshTokens.delete(refreshToken);
+    res.json({ message: 'Logged out successfully' });
+});
+
+// Refresh token route
+router.post('/refresh-token', (req, res) => {
+    const { refreshToken } = req.body;
+    if (!refreshToken || !refreshTokens.has(refreshToken)) {
+        return res.status(403).json({ message: 'Invalid refresh token' });
+    }
+
+    try {
+        const user = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
+        const accessToken = jwt.sign({ userId: user.userId }, process.env.JWT_SECRET, { expiresIn: '15m' });
+        res.json({ accessToken });
+    } catch (error) {
+        res.status(403).json({ message: 'Invalid refresh token' });
+    }
+});
+
 // Get user profile
 router.get('/profile', auth, async (req, res) => {
     try {
@@ -55,6 +94,33 @@ router.get('/profile', auth, async (req, res) => {
         res.json(user);
     } catch (error) {
         res.status(400).json({ message: 'Error fetching profile', error: error.message });
+    }
+});
+
+// Update user profile
+router.patch('/profile', auth, async (req, res) => {
+    try {
+        const updates = req.body;
+        const allowedUpdates = ['username', 'bio', 'profilePicture'];
+        const actualUpdates = Object.keys(updates).filter(update => allowedUpdates.includes(update));
+
+        if (actualUpdates.length === 0) {
+            return res.status(400).json({ message: 'No valid updates provided' });
+        }
+
+        const user = await User.findByIdAndUpdate(
+            req.userId,
+            { $set: updates },
+            { new: true, runValidators: true }
+        ).select('-passwordHash');
+
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        res.json(user);
+    } catch (error) {
+        res.status(400).json({ message: 'Error updating profile', error: error.message });
     }
 });
 
